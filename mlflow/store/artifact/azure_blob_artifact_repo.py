@@ -8,7 +8,7 @@ from mlflow.environment_variables import MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT
 from mlflow.exceptions import MlflowException
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.tracking._tracking_service.utils import _get_default_host_creds
-
+from azure.storage.blob import BlobServiceClient
 
 class AzureBlobArtifactRepository(ArtifactRepository):
     """
@@ -32,8 +32,6 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         if client:
             self.client = client
             return
-
-        from azure.storage.blob import BlobServiceClient
 
         (_, account, _, api_uri_suffix) = AzureBlobArtifactRepository.parse_wasbs_uri(artifact_uri)
         if "AZURE_STORAGE_CONNECTION_STRING" in os.environ:
@@ -71,8 +69,10 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         if parsed.scheme != "wasbs":
             raise Exception(f"Not a WASBS URI: {uri}")
 
+        pattern = r"([^@]+)@(([^.]+)\.(blob\.core\.(windows\.net|chinacloudapi\.cn|usgovcloudapi\.net)))"
+
         match = re.match(
-            r"([^@]+)@([^.]+)\.(blob\.core\.(windows\.net|chinacloudapi\.cn))", parsed.netloc
+            pattern, parsed.netloc
         )
 
         if match is None:
@@ -80,13 +80,16 @@ class AzureBlobArtifactRepository(ArtifactRepository):
                 "WASBS URI must be of the form "
                 "<container>@<account>.blob.core.windows.net"
                 " or <container>@<account>.blob.core.chinacloudapi.cn"
+                " or <container>@<account>.blob.core.usgovcloudapi.net"
             )
+        
         container = match.group(1)
         storage_account = match.group(2)
         api_uri_suffix = match.group(3)
         path = parsed.path
         if path.startswith("/"):
             path = path[1:]
+
         return container, storage_account, path, api_uri_suffix
 
     def log_artifact(self, local_file, artifact_path=None):
