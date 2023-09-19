@@ -15,10 +15,17 @@ class AzureBlobArtifactRepository(ArtifactRepository):
     Stores artifacts on Azure Blob Storage.
 
     This repository is used with URIs of the form
-    ``wasbs://<container-name>@<ystorage-account-name>.blob.core.windows.net/<path>``,
+    ``wasbs://<container-name>@<storage-account-name>.blob.core.windows.net/<path>``,
     following the same URI scheme as Hadoop on Azure blob storage. It requires either that:
     - Azure storage connection string is in the env var ``AZURE_STORAGE_CONNECTION_STRING``
     - Azure storage access key is in the env var ``AZURE_STORAGE_ACCESS_KEY``
+    - DefaultAzureCredential is configured
+
+    Can also be used with an Azurite local storage emulator
+    following the URI scheme explained here:
+    https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite
+    ``<scheme>://<local-machine-address>:<port>/<account-name>/<container-name>``
+    - A connection string is set in the env var ``AZURITE_STORAGE_CONNECTION_STRING``
     - DefaultAzureCredential is configured
     """
 
@@ -32,47 +39,37 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         if client:
             self.client = client
             return
+        
+        is_azurite = AzureBlobArtifactRepository.is_azurite_uri(artifact_uri) or "AZURITE_STORAGE_CONNECTION_STRING" in os.environ
+
+        if is_azurite:
+            self._create_client_azurite(artifact_uri)
+            return
 
         (_, account, _, api_uri_suffix) = AzureBlobArtifactRepository.parse_wasbs_uri(artifact_uri)
-        if "AZURE_STORAGE_CONNECTION_STRING" in os.environ:
-            self.client = BlobServiceClient.from_connection_string(
-                conn_str=os.environ.get("AZURE_STORAGE_CONNECTION_STRING"),
-                connection_verify=_get_default_host_creds(artifact_uri).verify,
-            )
-        elif "AZURE_STORAGE_ACCESS_KEY" in os.environ:
-            account_url = f"https://{account}.{api_uri_suffix}"
-            self.client = BlobServiceClient(
-                account_url=account_url,
-                credential=os.environ.get("AZURE_STORAGE_ACCESS_KEY"),
-                connection_verify=_get_default_host_creds(artifact_uri).verify,
-            )
-        else:
-            try:
-                from azure.identity import DefaultAzureCredential
-            except ImportError as exc:
-                raise ImportError(
-                    "Using DefaultAzureCredential requires the azure-identity package. "
-                    "Please install it via: pip install azure-identity"
-                ) from exc
 
-            account_url = f"https://{account}.{api_uri_suffix}"
-            self.client = BlobServiceClient(
-                account_url=account_url,
-                credential=DefaultAzureCredential(),
-                connection_verify=_get_default_host_creds(artifact_uri).verify,
-            )
+        self._create_client_blob_storage(artifact_uri, account, api_uri_suffix)
+  
+    @staticmethod
+    def is_azurite_uri(uri):
+        """Parse a localhost Azurite URI"""
+        parsed = urllib.parse.urlparse(uri)
 
+        return True if (parsed.scheme == "http" or parsed.scheme == "https") and ":" in parsed.netloc else False
+          
     @staticmethod
     def parse_wasbs_uri(uri):
         """Parse a wasbs:// URI, returning (container, storage_account, path, api_uri_suffix)."""
         parsed = urllib.parse.urlparse(uri)
-        if parsed.scheme != "wasbs":
+        (scheme, netloc, path, _, _, _) = parsed
+
+        if scheme != "wasbs":
             raise Exception(f"Not a WASBS URI: {uri}")
 
         pattern = r"([^@]+)@(([^.]+)\.(blob\.core\.(windows\.net|chinacloudapi\.cn|usgovcloudapi\.net)))"
 
         match = re.match(
-            pattern, parsed.netloc
+            pattern, netloc
         )
 
         if match is None:
@@ -86,7 +83,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         container = match.group(1)
         storage_account = match.group(2)
         api_uri_suffix = match.group(3)
-        path = parsed.path
+
         if path.startswith("/"):
             path = path[1:]
 
@@ -172,6 +169,9 @@ class AzureBlobArtifactRepository(ArtifactRepository):
             return []
         return sorted(infos, key=lambda f: f.path)
 
+    def delete_artifacts(self, artifact_path=None):
+        raise MlflowException("Not implemented yet")
+
     def _download_file(self, remote_file_path, local_path):
         (container, _, remote_root_path, _) = self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
@@ -179,5 +179,53 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         with open(local_path, "wb") as file:
             container_client.download_blob(remote_full_path).readinto(file)
 
-    def delete_artifacts(self, artifact_path=None):
-        raise MlflowException("Not implemented yet")
+
+    def _create_client_azurite(self, artifact_uri):
+        if "AZURITE_STORAGE_CONNECTION_STRING" in os.environ:
+            self.client = BlobServiceClient.from_connection_string(
+                conn_str=os.environ.get("AZURITE_STORAGE_CONNECTION_STRING"),
+                connection_verify=_get_default_host_creds(artifact_uri).verify,
+            )
+        else:
+            try:
+                from azure.identity import DefaultAzureCredential
+            except ImportError as exc:
+                raise ImportError(
+                    "Using DefaultAzureCredential requires the azure-identity package. "
+                    "Please install it via: pip install azure-identity"
+                ) from exc
+
+            self.client = BlobServiceClient(
+                account_url=artifact_uri,
+                credential=DefaultAzureCredential(),
+                connection_verify=_get_default_host_creds(artifact_uri).verify,
+            )  
+
+    def _create_client_blob_storage(self, artifact_uri, account, api_uri_suffix):
+        if "AZURE_STORAGE_CONNECTION_STRING" in os.environ:
+            self.client = BlobServiceClient.from_connection_string(
+                conn_str=os.environ.get("AZURE_STORAGE_CONNECTION_STRING"),
+                connection_verify=_get_default_host_creds(artifact_uri).verify,
+            )
+        elif "AZURE_STORAGE_ACCESS_KEY" in os.environ:
+            account_url = f"https://{account}.{api_uri_suffix}"
+            self.client = BlobServiceClient(
+                account_url=account_url,
+                credential=os.environ.get("AZURE_STORAGE_ACCESS_KEY"),
+                connection_verify=_get_default_host_creds(artifact_uri).verify,
+            )
+        else:   
+            try:
+                from azure.identity import DefaultAzureCredential
+            except ImportError as exc:
+                raise ImportError(
+                    "Using DefaultAzureCredential requires the azure-identity package. "
+                    "Please install it via: pip install azure-identity"
+                ) from exc
+
+            account_url = f"https://{account}.{api_uri_suffix}"
+            self.client = BlobServiceClient(
+                account_url=account_url,
+                credential=DefaultAzureCredential(),
+                connection_verify=_get_default_host_creds(artifact_uri).verify,
+            )  
