@@ -3,16 +3,16 @@ import posixpath
 import re
 import urllib.parse
 
+from azure.storage.blob import BlobServiceClient
 from mlflow.entities import FileInfo
 from mlflow.environment_variables import MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT
 from mlflow.exceptions import MlflowException
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.tracking._tracking_service.utils import _get_default_host_creds
-from azure.storage.blob import BlobServiceClient
 
 class AzureBlobArtifactRepository(ArtifactRepository):
     """
-    Stores artifacts on Azure Blob Storage.
+    Stores artifacts on Azure Blob Storage & Azurite.
 
     This repository is used with URIs of the form
     ``wasbs://<container-name>@<storage-account-name>.blob.core.windows.net/<path>``,
@@ -40,9 +40,9 @@ class AzureBlobArtifactRepository(ArtifactRepository):
             self.client = client
             return
         
-        is_azurite = AzureBlobArtifactRepository.is_azurite_uri(artifact_uri) or "AZURITE_STORAGE_CONNECTION_STRING" in os.environ
+        self.is_azurite = AzureBlobArtifactRepository.is_azurite_uri(artifact_uri) or "AZURITE_STORAGE_CONNECTION_STRING" in os.environ
 
-        if is_azurite:
+        if self.is_azurite:
             self._create_client_azurite(artifact_uri)
             return
 
@@ -52,11 +52,23 @@ class AzureBlobArtifactRepository(ArtifactRepository):
   
     @staticmethod
     def is_azurite_uri(uri):
-        """Parse a localhost Azurite URI"""
+        """Determine if URI is pointed to a local Azurite emulator"""
         parsed = urllib.parse.urlparse(uri)
 
-        return True if (parsed.scheme == "http" or parsed.scheme == "https") and ":" in parsed.netloc else False
-          
+        return True if (parsed.scheme == "http" or parsed.scheme == "https") and ":" in parsed.netloc else False    
+
+    @staticmethod
+    def parse_azurite_uri(uri):
+        """Parse a localhost Azurite URI"""
+        parsed = urllib.parse.urlparse(uri)
+        (scheme, netloc, path, _, _, _) = parsed
+
+        container = path.split('/')[-1]
+        if path.startswith("/"):
+            path = path[1:]
+
+        return container, scheme, path, netloc
+
     @staticmethod
     def parse_wasbs_uri(uri):
         """Parse a wasbs:// URI, returning (container, storage_account, path, api_uri_suffix)."""
@@ -90,7 +102,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         return container, storage_account, path, api_uri_suffix
 
     def log_artifact(self, local_file, artifact_path=None):
-        (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
+        (container, _, dest_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -101,7 +113,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
             )
 
     def log_artifacts(self, local_dir, artifact_path=None):
-        (container, _, dest_path, _) = self.parse_wasbs_uri(self.artifact_uri)
+        (container, _, dest_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         if artifact_path:
             dest_path = posixpath.join(dest_path, artifact_path)
@@ -132,7 +144,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
         def is_dir(result):
             return isinstance(result, BlobPrefix)
 
-        (container, _, artifact_path, _) = self.parse_wasbs_uri(self.artifact_uri)
+        (container, _, dest_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         dest_path = artifact_path
         if path:
@@ -172,12 +184,12 @@ class AzureBlobArtifactRepository(ArtifactRepository):
     def delete_artifacts(self, artifact_path=None):
         raise MlflowException("Not implemented yet")
 
-    def _download_file(self, remote_file_path, local_path):
-        (container, _, remote_root_path, _) = self.parse_wasbs_uri(self.artifact_uri)
+    def _download_file(self, file_path, local_path):
+        (container, _, root_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
-        remote_full_path = posixpath.join(remote_root_path, remote_file_path)
+        full_path = posixpath.join(root_path, file_path)
         with open(local_path, "wb") as file:
-            container_client.download_blob(remote_full_path).readinto(file)
+            container_client.download_blob(full_path).readinto(file)
 
 
     def _create_client_azurite(self, artifact_uri):
@@ -187,17 +199,9 @@ class AzureBlobArtifactRepository(ArtifactRepository):
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )
         else:
-            try:
-                from azure.identity import DefaultAzureCredential
-            except ImportError as exc:
-                raise ImportError(
-                    "Using DefaultAzureCredential requires the azure-identity package. "
-                    "Please install it via: pip install azure-identity"
-                ) from exc
-
             self.client = BlobServiceClient(
                 account_url=artifact_uri,
-                credential=DefaultAzureCredential(),
+                credential=self._get_default_azure_credential(),
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )  
 
@@ -215,17 +219,19 @@ class AzureBlobArtifactRepository(ArtifactRepository):
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )
         else:   
-            try:
-                from azure.identity import DefaultAzureCredential
-            except ImportError as exc:
-                raise ImportError(
-                    "Using DefaultAzureCredential requires the azure-identity package. "
-                    "Please install it via: pip install azure-identity"
-                ) from exc
-
             account_url = f"https://{account}.{api_uri_suffix}"
             self.client = BlobServiceClient(
                 account_url=account_url,
-                credential=DefaultAzureCredential(),
+                credential=self._get_default_azure_credential(),
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )  
+    
+    def _get_default_azure_credential(self):
+        try:
+            from azure.identity import DefaultAzureCredential
+            return DefaultAzureCredential
+        except ImportError as exc:
+            raise ImportError(
+                "Using DefaultAzureCredential requires the azure-identity package. "
+                "Please install it via: pip install azure-identity"
+            ) from exc
