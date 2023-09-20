@@ -16,7 +16,8 @@ class AzureBlobArtifactRepository(ArtifactRepository):
 
     This repository is used with URIs of the form
     ``wasbs://<container-name>@<storage-account-name>.blob.core.windows.net/<path>``,
-    following the same URI scheme as Hadoop on Azure blob storage. It requires either that:
+    following the same URI scheme as Hadoop on Azure blob storage. 
+    It requires either that:
     - Azure storage connection string is in the env var ``AZURE_STORAGE_CONNECTION_STRING``
     - Azure storage access key is in the env var ``AZURE_STORAGE_ACCESS_KEY``
     - DefaultAzureCredential is configured
@@ -25,6 +26,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
     following the URI scheme explained here:
     https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite
     ``<scheme>://<local-machine-address>:<port>/<account-name>/<container-name>``
+    It requires either that:
     - A connection string is set in the env var ``AZURITE_STORAGE_CONNECTION_STRING``
     - DefaultAzureCredential is configured
     """
