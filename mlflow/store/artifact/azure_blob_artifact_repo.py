@@ -40,21 +40,19 @@ class AzureBlobArtifactRepository(ArtifactRepository):
             self.client = client
             return
         
-        self.is_azurite = AzureBlobArtifactRepository.is_azurite_uri(artifact_uri) or "AZURITE_STORAGE_CONNECTION_STRING" in os.environ
+        self.is_azurite = self.is_azurite_uri(artifact_uri) or "AZURITE_STORAGE_CONNECTION_STRING" in os.environ
 
-        if self.is_azurite:
-            self._create_client_azurite(artifact_uri)
-            return
+        self._create_client_azurite(artifact_uri) if self.is_azurite else self._create_client_blob_storage(artifact_uri)
 
-        (_, account, _, api_uri_suffix) = AzureBlobArtifactRepository.parse_wasbs_uri(artifact_uri)
-
-        self._create_client_blob_storage(artifact_uri, account, api_uri_suffix)
-  
     @staticmethod
     def is_azurite_uri(uri):
         """Determine if URI is pointed to a local Azurite emulator"""
         parsed = urllib.parse.urlparse(uri)
 
+        # Currently the DefaultAzureCredential TokenCredential authentication flow does not support HTTP
+        # If not using a connection string with SAS token or other credentialing
+        # An HTTPS URI must be used with DefaultAzureCredential. Added HTTP for posterity 
+        # More info: https://blog.jongallant.com/2020/02/azurite-https-defaultazurecredential/
         return True if (parsed.scheme == "http" or parsed.scheme == "https") and ":" in parsed.netloc else False    
 
     @staticmethod
@@ -143,8 +141,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
 
         def is_dir(result):
             return isinstance(result, BlobPrefix)
-
-        (container, _, dest_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
+        (container, _, artifact_path, _) = self.parse_azurite_uri(self.artifact_uri) if self.is_azurite else self.parse_wasbs_uri(self.artifact_uri)
         container_client = self.client.get_container_client(container)
         dest_path = artifact_path
         if path:
@@ -205,23 +202,23 @@ class AzureBlobArtifactRepository(ArtifactRepository):
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )  
 
-    def _create_client_blob_storage(self, artifact_uri, account, api_uri_suffix):
+    def _create_client_blob_storage(self, artifact_uri):
+        (_, account, _, api_uri_suffix) = self.parse_wasbs_uri(artifact_uri)
+
         if "AZURE_STORAGE_CONNECTION_STRING" in os.environ:
             self.client = BlobServiceClient.from_connection_string(
                 conn_str=os.environ.get("AZURE_STORAGE_CONNECTION_STRING"),
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )
         elif "AZURE_STORAGE_ACCESS_KEY" in os.environ:
-            account_url = f"https://{account}.{api_uri_suffix}"
             self.client = BlobServiceClient(
-                account_url=account_url,
+                account_url=f"https://{account}.{api_uri_suffix}",
                 credential=os.environ.get("AZURE_STORAGE_ACCESS_KEY"),
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )
         else:   
-            account_url = f"https://{account}.{api_uri_suffix}"
             self.client = BlobServiceClient(
-                account_url=account_url,
+                account_url=f"https://{account}.{api_uri_suffix}",
                 credential=self._get_default_azure_credential(),
                 connection_verify=_get_default_host_creds(artifact_uri).verify,
             )  
@@ -229,7 +226,7 @@ class AzureBlobArtifactRepository(ArtifactRepository):
     def _get_default_azure_credential(self):
         try:
             from azure.identity import DefaultAzureCredential
-            return DefaultAzureCredential
+            return DefaultAzureCredential()
         except ImportError as exc:
             raise ImportError(
                 "Using DefaultAzureCredential requires the azure-identity package. "
